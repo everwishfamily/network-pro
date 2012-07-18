@@ -12,6 +12,7 @@
 #include <sys/socket.h>
 #include <errno.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <limits.h>
 #include <netdb.h>
@@ -59,33 +60,29 @@ int parse_http_url(
 		return -1;
 	}
 
+	// fix error input url format
 	size_t l = strlen(url);
-	char *p = url + size;
-	char *p1 = NULL;
-	if (!(p1 = (strchr(p, '/'))))
-	{
-		// p1 point end of url if not find '/'
-		p1 = url + l;
-	}
+	if (url[l-1] == '/') url[(l--)-1] = '\0';
 
-	// get port 
+	// p point next of "http://"
+	char *p = url + size;
+
+	// get port, set it 80 if no specify port 
 	char *p2 = NULL;
-	if (p2 = (strchr(p, ':')))
-	{
-		*port = atoi(p2 + 1);
-	}
-	// set it 80 if no specify port
+	if ((p2 = (strchr(p, ':')))) *port = atoi(p2 + 1);
 	if (*port == 0) *port = 80;
 	test_log(MSG_INFO, 0, stdout, "port: %d\n", *port);
 
+	char *p1 = NULL;
+	p1 = strchr(p, '/');
+
 	// calc domain size and copy it
-	size_t ds = p2 ? p2 - p : p1 - p;
+	size_t ds = p2 ? p2 - p : (p1 ? p1 : (url+l)) - p;
 	strncpy(domain, p, ds);
 	test_log(MSG_INFO, 0, stdout, "domain: %s\n", domain);
 
 	// get saved file name
-	char *p3 = strrchr(p1, '/');
-	strcpy(file, p3 ? p3 + 1 : HTTP_REQUEST_DEFAULT_FILE);
+	strcpy(file, p1 ? p1 + 1 : HTTP_REQUEST_DEFAULT_FILE);
 	test_log(MSG_INFO, 0, stdout, "file: %s\n", file);
 
 	return 0;
@@ -161,7 +158,7 @@ int main(int argc, char **argv)
 	test_log(MSG_INFO, 0, stdout, "request: %s\n", request);
 
 	// send request
-	size_t send = 0;
+	int send = 0;
 	size_t totalsend = 0;
 	size_t nbytes = strlen(request);
 	while(totalsend < nbytes) 
@@ -176,21 +173,43 @@ int main(int argc, char **argv)
 	}
 
 	// open local file
-	FILE *fp = fopen(file, "w+b");
-	if (!fp)
+	char *pl = NULL;
+	pl = strrchr(file, '/');
+	pl = pl ? pl + 1 : file;
+	test_log(MSG_INFO, 0, stdout, "local file: %s\n", pl);
+
+	int fp = open(pl, O_CREAT|O_RDWR|O_TRUNC, S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);
+	if (fp == -1)
 	{
 		test_log(MSG_ERROR, errno, stderr, "open %s failed!\n", file);
 		return -1;
 	}
 
 	// read response buf
-	size_t rb = 0;
+	int flag = 0;
+	char *pb = NULL;
+	char *p = NULL;
+	ssize_t rb = 0;
 	char buf[1024];
 	memset(buf, 0, sizeof(buf));
-	while (rb = (read(sockfd, buf, sizeof(buf))) > 0)	
+	while ((rb = (read(sockfd, buf, sizeof(buf)))) > 0)	
 	{
-		test_log(MSG_INFO, 0, stdout, "read: %s\n", buf);
-		if (fwrite(buf, 1, rb, fp) != rb)
+		// skip response header
+		p = buf;
+		pb = NULL;
+		if (!flag && (p = strstr(p, "\r\n\r\n")))
+		{
+			test_log(MSG_INFO, 0, stdout, "response head: %s\n", buf);
+			pb = p;	
+			flag = 1;
+		}
+
+		// get real data pointer and data size
+		pb = pb ? pb + 4 : buf;
+		rb -= pb - buf;
+
+		// write into file
+		if (rb && write(fp, pb, rb) != rb)
 		{
 			test_log(MSG_ERROR, errno, stderr, "fwrite %s failed!\n", file);
 			break;
@@ -199,7 +218,7 @@ int main(int argc, char **argv)
 	}
 
 	// close all fd
-	fclose(fp);
+	close(fp);
 	close(sockfd);
 
 	return 0;
